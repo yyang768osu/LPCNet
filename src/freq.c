@@ -42,6 +42,9 @@
 
 #define SQUARE(x) ((x)*(x))
 
+// bark-18
+// index in the frequency domain 
+// 0, 4, 8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 136, 160 
 static const opus_int16 eband5ms[] = {
 /*0  200 400 600 800  1k 1.2 1.4 1.6  2k 2.4 2.8 3.2  4k 4.8 5.6 6.8  8k*/
   0,  1,  2,  3,  4,  5,  6,  7,  8, 10, 12, 14, 16, 20, 24, 28, 34, 40
@@ -52,11 +55,15 @@ typedef struct {
   int init;
   kiss_fft_state *kfft;
   float half_window[OVERLAP_SIZE];
-  float dct_table[NB_BANDS*NB_BANDS];
+  float dct_table[NB_BANDS*NB_BANDS]; // DCT transform matrix for the bark-18 spectrogram
 } CommonState;
 
 
-
+// triangle filter bank
+// e.g., in between fft-index 8 and 12 (mfcc index i=2)
+// j = 0, 1, 2, 3
+// mfcc[i] += [1-(j/4)]*fft[i+j]^2
+// mfcc[i+1] += (j/4)*fft[i+j]^2
 void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   int i;
   float sum[NB_BANDS] = {0};
@@ -74,6 +81,8 @@ void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
       sum[i+1] += frac*tmp;
     }
   }
+  // notice that sum[NB_BANDS-1] does not contain fft[160]
+  // the two lines below try to take into account that the edge two tones are calculated with half triangle
   sum[0] *= 2;
   sum[NB_BANDS-1] *= 2;
   for (i=0;i<NB_BANDS;i++)
@@ -82,6 +91,7 @@ void compute_band_energy(float *bandE, const kiss_fft_cpx *X) {
   }
 }
 
+// does not look like this function is used anywhere. Why????
 void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *P) {
   int i;
   float sum[NB_BANDS] = {0};
@@ -107,9 +117,13 @@ void compute_band_corr(float *bandE, const kiss_fft_cpx *X, const kiss_fft_cpx *
   }
 }
 
+// result in g has 161 dimension (index 0 to 160)
+// however, g is filled in only up to  index
+// eband5ms[NB_BANDS-1]*WINDOW_SIZE_5MS-1 = 159 ??
+// g[160] = 0, why????
 void interp_band_gain(float *g, const float *bandE) {
   int i;
-  memset(g, 0, FREQ_SIZE);
+  memset(g, 0, FREQ_SIZE); // 161 dimension
   for (i=0;i<NB_BANDS-1;i++)
   {
     int j;
@@ -127,13 +141,17 @@ CommonState common;
 static void check_init() {
   int i;
   if (common.init) return;
-  common.kfft = opus_fft_alloc_twiddles(WINDOW_SIZE, NULL, NULL, NULL, 0);
+  common.kfft = opus_fft_alloc_twiddles(WINDOW_SIZE, NULL, NULL, NULL, 0); // WINDOW_SIZE=320
   for (i=0;i<OVERLAP_SIZE;i++)
+     // hanning window: sin^2(n*pi/(N-1))
+     // the following window: sin[0.5*pi  sin^2((i+0.5)*pi/320)   ], the window is centered at 159.5, why the outer sine???? is it a bug?
     common.half_window[i] = sin(.5*M_PI*sin(.5*M_PI*(i+.5)/OVERLAP_SIZE) * sin(.5*M_PI*(i+.5)/OVERLAP_SIZE));
   for (i=0;i<NB_BANDS;i++) {
     int j;
     for (j=0;j<NB_BANDS;j++) {
+       // DCT type II (https://en.wikipedia.org/wiki/Discrete_cosine_transform)
       common.dct_table[i*NB_BANDS + j] = cos((i+.5)*j*M_PI/NB_BANDS);
+       // X0 term is multiplied by 1/sqrt(2)
       if (j==0) common.dct_table[i*NB_BANDS + j] *= sqrt(.5);
     }
   }
@@ -142,13 +160,14 @@ static void check_init() {
 
 void dct(float *out, const float *in) {
   int i;
-  check_init();
+  check_init(); // populate common
   for (i=0;i<NB_BANDS;i++) {
     int j;
     float sum = 0;
     for (j=0;j<NB_BANDS;j++) {
       sum += in[j] * common.dct_table[j*NB_BANDS + i];
     }
+    // this is equivalent to multiplying the overall matrix with sqrt(2/N), making it an orthogonal matrix
     out[i] = sum*sqrt(2./NB_BANDS);
   }
 }
@@ -189,6 +208,7 @@ void inverse_transform(float *out, const kiss_fft_cpx *in) {
   for (i=0;i<FREQ_SIZE;i++) {
     x[i] = in[i];
   }
+   // ifft of conjugate leads to conjugate-reverse of results, but why????
   for (;i<WINDOW_SIZE;i++) {
     x[i].r = x[WINDOW_SIZE - i].r;
     x[i].i = -x[WINDOW_SIZE - i].i;
@@ -211,12 +231,16 @@ float lpc_from_bands(float *lpc, const float *Ex)
    kiss_fft_cpx X_auto[FREQ_SIZE];
    float x_auto[WINDOW_SIZE];
    interp_band_gain(Xr, Ex);
+   // the line below is not necessary; interp_band_gain does not even populate Xr[160]
+   // but why????
    Xr[FREQ_SIZE-1] = 0;
    RNN_CLEAR(X_auto, FREQ_SIZE);
    for (i=0;i<FREQ_SIZE;i++) X_auto[i].r = Xr[i];
+   // by Wiener-Khinchin, autocorrelation function is ifft of PSD (approximated by interpolated band_gain in this case)
    inverse_transform(x_auto, X_auto);
    for (i=0;i<LPC_ORDER+1;i++) ac[i] = x_auto[i];
 
+   // why ????
    /* -40 dB noise floor. */
    ac[0] += ac[0]*1e-4 + 320/12/38.;
    /* Lag windowing. */
@@ -237,6 +261,7 @@ float lpc_from_cepstrum(float *lpc, const float *cepstrum)
    return lpc_from_bands(lpc, Ex);
 }
 
+// apply sin(0.5*pi* hanning-window)
 void apply_window(float *x) {
   int i;
   check_init();
