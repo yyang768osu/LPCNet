@@ -30,6 +30,8 @@ static RNN_INLINE float log2_approx(float x)
    return 1+integer+frac;
 }
 
+// 1/log2(e) = 0.69315
+// log(x) = log2(x)/log2(e)
 #define log_approx(x) (0.69315f*log2_approx(x))
 
 static RNN_INLINE float ulaw2lin(float u)
@@ -42,6 +44,11 @@ static RNN_INLINE float ulaw2lin(float u)
     return s*scale_1*(exp(u/128.*LOG256)-1);
 }
 
+// mu_law = sign(x) ln(1+mu*abs(x))/ln(1+mu) for x in [-1,1]; mu_law in [-1, 1]
+// mu_law = 128 * sign(x) ln(1+mu*abs(x/range))/ln(1+mu) for x in [-range, range] range=2^15=32768; mu_law in [-128,128]
+// mu_law = 128 + 128 * sign(x) ln(1+mu*abs(x/range))/ln(1+mu) for x in [-range, range] range=2^15=32768; mu_law in [0,255]
+// mu = 255
+// log(1+mu) = LOG256 = 5.54517744448
 static RNN_INLINE int lin2ulaw(float x)
 {
     float u;
